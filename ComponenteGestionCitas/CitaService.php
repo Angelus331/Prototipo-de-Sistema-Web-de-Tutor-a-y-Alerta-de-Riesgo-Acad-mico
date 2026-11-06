@@ -14,8 +14,11 @@ class CitaService
     {
         $this->tutorService = $tutorService;
 
-        // Datos de ejemplo (se reemplazarán por BD)
-        if (!isset($_SESSION['citas'])) {
+        // Si no hay citas, o hay citas viejas sin tutor_id, se reinicia con la semilla
+        $sesionInvalida = !isset($_SESSION['citas'])
+            || count(array_filter($_SESSION['citas'], fn($c) => !isset($c['tutor_id']))) > 0;
+
+        if ($sesionInvalida) {
             $_SESSION['citas'] = [
                 [
                     'id' => 1,
@@ -146,7 +149,7 @@ class CitaService
                 continue;
             }
             if (
-                $c['tutor_id'] == $tutorId && $c['fecha'] === $fecha
+                ($c['tutor_id'] ?? null) == $tutorId && $c['fecha'] === $fecha
                 && $ini < $c['hora_fin'] && $fin > $c['hora_inicio']
             ) {
                 return ["El tutor ya tiene una cita de {$c['hora_inicio']} a {$c['hora_fin']} ese día."];
