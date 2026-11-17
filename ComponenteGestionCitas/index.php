@@ -1,12 +1,26 @@
 <?php
 session_start();
 require_once __DIR__ . '/TutorService.php';
+require_once __DIR__ . '/EstudianteService.php';
+require_once __DIR__ . '/CitaRepository.php';
+require_once __DIR__ . '/NotificacionService.php';
 require_once __DIR__ . '/CitaService.php';
 require_once __DIR__ . '/CitaController.php';
 
 $tutorService = new TutorService();
-$controller = new CitaController(new CitaService($tutorService), 'David Mamani');
+$estudianteService = new EstudianteService();
+$notificaciones = new NotificacionService();
+$estudianteId = 1; // estudiante con sesión iniciada (David Mamani)
+$controller = new CitaController(
+    new CitaService($tutorService, $estudianteService, new SesionCitaRepository(), $notificaciones),
+    $estudianteId
+);
 $tutores = $tutorService->listarTutores();
+
+// Consulta de horarios disponibles (GET)
+$consTutor = (int) ($_GET['ver_tutor'] ?? 0);
+$consFecha = $_GET['ver_fecha'] ?? '';
+$horarios = ($consTutor && $consFecha) ? $controller->horariosDisponibles($consTutor, $consFecha) : null;
 
 $errores = [];
 $success = '';
@@ -98,8 +112,32 @@ $conservar = $_SERVER['REQUEST_METHOD'] === 'POST' && $accionPost === 'agendar' 
             </form>
         </div>
 
+        <div class="bg-white p-6 rounded-xl shadow-md">
+            <h3 class="text-lg font-bold text-slate-800 mb-3">Horarios disponibles</h3>
+            <form method="GET" class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-3">
+                <select name="ver_tutor" class="p-2 border border-slate-300 rounded-lg bg-white">
+                    <?php foreach ($tutores as $id => $t): ?>
+                        <option value="<?= $id ?>" <?= $consTutor === $id ? 'selected' : '' ?>><?= e($t['nombre']) ?></option>
+                    <?php endforeach; ?>
+                </select>
+                <input type="date" name="ver_fecha" value="<?= e($consFecha) ?>" class="p-2 border border-slate-300 rounded-lg">
+                <button type="submit" class="bg-slate-700 text-white p-2 rounded-lg font-medium">Ver horarios</button>
+            </form>
+            <?php if ($horarios !== null): ?>
+                <?php if (empty($horarios)): ?>
+                    <p class="text-sm text-slate-500">No hay horarios libres para ese tutor y fecha.</p>
+                <?php else: ?>
+                    <div class="flex flex-wrap gap-2">
+                        <?php foreach ($horarios as $h): ?>
+                            <span class="px-3 py-1 bg-green-50 text-green-700 rounded-md text-sm"><?= e($h['inicio']) ?> - <?= e($h['fin']) ?></span>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+            <?php endif; ?>
+        </div>
+
         <div id="calendario-citas" class="bg-white p-6 rounded-xl shadow-md">
-            <h3 class="text-lg font-bold text-slate-800 mb-3">Calendario y Citas Registradas</h3>
+            <h3 class="text-lg font-bold text-slate-800 mb-3">Calendario y Citas Registradas (<?= e($estudianteService->obtenerNombre($estudianteId)) ?>)</h3>
 
             <?php if (empty($citas)): ?>
                 <p class="text-slate-500 text-sm">No hay citas registradas en el sistema todavía.</p>
@@ -124,8 +162,9 @@ $conservar = $_SERVER['REQUEST_METHOD'] === 'POST' && $accionPost === 'agendar' 
                                     <td class="p-3"><?= e($c['tutor']) ?></td>
                                     <td class="p-3"><?= e($c['fecha']) ?> (<?= e($c['hora_inicio']) ?> -
                                         <?= e($c['hora_fin']) ?>)</td>
-                                    <td class="p-3"><span class="text-green-600 font-medium"><?= e($c['estado']) ?></span></td>
+                                    <td class="p-3"><span class="<?= $c['estado'] === 'Cancelada' ? 'text-red-600' : 'text-green-600' ?> font-medium"><?= e($c['estado']) ?></span></td>
                                     <td class="p-3">
+                                        <?php if ($c['estado'] !== 'Cancelada'): ?>
                                         <div class="flex flex-col items-center gap-2">
                                             <form method="POST"
                                                 onsubmit="return confirm('¿Estás seguro de cancelar esta cita?');">
@@ -152,6 +191,9 @@ $conservar = $_SERVER['REQUEST_METHOD'] === 'POST' && $accionPost === 'agendar' 
                                                 </form>
                                             </details>
                                         </div>
+                                        <?php else: ?>
+                                            <span class="text-slate-400 text-xs">—</span>
+                                        <?php endif; ?>
                                     </td>
                                 </tr>
                             <?php endforeach; ?>
@@ -160,6 +202,18 @@ $conservar = $_SERVER['REQUEST_METHOD'] === 'POST' && $accionPost === 'agendar' 
                 </div>
             <?php endif; ?>
         </div>
+
+        <?php $correos = $notificaciones->ultimas(); ?>
+        <?php if (!empty($correos)): ?>
+            <div class="bg-white p-6 rounded-xl shadow-md">
+                <h3 class="text-lg font-bold text-slate-800 mb-3">Correos enviados (simulado)</h3>
+                <ul class="text-sm text-slate-600 space-y-1">
+                    <?php foreach ($correos as $m): ?>
+                        <li><?= e($m['fecha']) ?> — a <?= e($m['para']) ?>: <?= e($m['mensaje']) ?></li>
+                    <?php endforeach; ?>
+                </ul>
+            </div>
+        <?php endif; ?>
 
     </div>
 </body>

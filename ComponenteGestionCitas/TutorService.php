@@ -26,6 +26,13 @@ class TutorService
         return $this->tutores[$id]['nombre'] ?? null;
     }
 
+    /** Devuelve ['inicio' => 'HH:MM', 'fin' => 'HH:MM'] o null si el tutor no existe. */
+    public function obtenerHorario(int $id): ?array
+    {
+        $t = $this->tutores[$id] ?? null;
+        return $t ? ['inicio' => $t['inicio'], 'fin' => $t['fin']] : null;
+    }
+
     /**
      * Servicio que consume Gestión de Citas.
      * Recibe: id del tutor, hora de inicio y hora de fin.

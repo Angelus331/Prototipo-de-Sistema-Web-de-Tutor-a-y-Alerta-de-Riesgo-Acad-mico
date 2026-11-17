@@ -1,63 +1,66 @@
 <?php
 require_once __DIR__ . '/TutorService.php';
+require_once __DIR__ . '/EstudianteService.php';
+require_once __DIR__ . '/CitaRepository.php';
+require_once __DIR__ . '/NotificacionService.php';
 
 /**
  * Componente: Gestión de Citas
  * Responsabilidad: gestionar el ciclo de vida de las citas de acompañamiento,
  * validando la disponibilidad del tutor y controlando el estado de las citas.
+ * Estados: Confirmada -> Reprogramada -> Cancelada.
+ *
+ * Colabora (solo por métodos públicos) con:
+ *  - Gestión de Tutores      (TutorService)
+ *  - Gestión de Estudiantes  (EstudianteService)
+ *  - Persistencia de Citas   (CitaRepository)
+ *  - Notificaciones          (NotificacionService)
  */
 class CitaService
 {
     private TutorService $tutorService;
+    private EstudianteService $estudianteService;
+    private CitaRepository $repo;
+    private NotificacionService $notificaciones;
 
-    public function __construct(TutorService $tutorService)
-    {
+    public function __construct(
+        TutorService $tutorService,
+        EstudianteService $estudianteService,
+        CitaRepository $repo,
+        NotificacionService $notificaciones
+    ) {
         $this->tutorService = $tutorService;
-
-        // Si no hay citas, o hay citas viejas sin tutor_id, se reinicia con la semilla
-        $sesionInvalida = !isset($_SESSION['citas'])
-            || count(array_filter($_SESSION['citas'], fn($c) => !isset($c['tutor_id']))) > 0;
-
-        if ($sesionInvalida) {
-            $_SESSION['citas'] = [
-                [
-                    'id' => 1,
-                    'estudiante' => 'David Mamani',
-                    'tutor_id' => 1,
-                    'tutor' => 'Dr. Carlos Pérez',
-                    'fecha' => '2026-11-10',
-                    'hora_inicio' => '09:00',
-                    'hora_fin' => '10:00',
-                    'estado' => 'Confirmada',
-                ]
-            ];
-        }
+        $this->estudianteService = $estudianteService;
+        $this->repo = $repo;
+        $this->notificaciones = $notificaciones;
     }
 
     /** Recibe los datos, valida, procesa y devuelve el resultado. */
-    public function agendarCita(string $estudiante, array $datos): array
+    public function agendarCita(int $estudianteId, array $datos): array
     {
-        $errores = $this->validarDatos($datos);
-
+        $errores = $this->validarEstudiante($estudianteId);
+        if (empty($errores)) {
+            $errores = $this->validarDatos($datos);
+        }
         if (empty($errores)) {
             $errores = $this->verificarDisponibilidad(
-                (int) $datos['tutor_id'],
-                $datos['fecha'],
-                $datos['hora_inicio'],
-                $datos['hora_fin']
+                (int) $datos['tutor_id'], $datos['fecha'], $datos['hora_inicio'], $datos['hora_fin']
+            );
+        }
+        if (empty($errores)) {
+            $errores = $this->verificarCruceEstudiante(
+                $estudianteId, $datos['fecha'], $datos['hora_inicio'], $datos['hora_fin']
             );
         }
         if (!empty($errores)) {
             return ['ok' => false, 'errores' => $errores];
         }
 
-        $citas = $this->consultarCitas();
-        $nuevoId = $citas ? max(array_column($citas, 'id')) + 1 : 1;
         $tutorId = (int) $datos['tutor_id'];
-
-        $_SESSION['citas'][] = [
-            'id' => $nuevoId,
-            'estudiante' => $estudiante,
+        $cita = [
+            'id' => $this->repo->siguienteId(),
+            'estudiante_id' => $estudianteId,
+            'estudiante' => $this->estudianteService->obtenerNombre($estudianteId),
             'tutor_id' => $tutorId,
             'tutor' => $this->tutorService->obtenerNombre($tutorId),
             'fecha' => $datos['fecha'],
@@ -65,77 +68,110 @@ class CitaService
             'hora_fin' => $datos['hora_fin'],
             'estado' => 'Confirmada',
         ];
+        $this->repo->guardar($cita);
+        $this->notificar('Cita confirmada', $cita);
 
         return ['ok' => true, 'mensaje' => '¡Cita agendada y validada exitosamente!'];
     }
 
+    /** Cancela (no borra): la cita queda como "Cancelada" y libera el horario. */
     public function cancelarCita(int $id): bool
     {
-        $antes = count($_SESSION['citas']);
-        $_SESSION['citas'] = array_values(array_filter(
-            $_SESSION['citas'],
-            fn($c) => $c['id'] !== $id
-        ));
-        return count($_SESSION['citas']) < $antes;
+        $cita = $this->repo->buscar($id);
+        if (!$cita || $cita['estado'] === 'Cancelada') {
+            return false;
+        }
+        $cita['estado'] = 'Cancelada';
+        $this->repo->guardar($cita);
+        $this->notificar('Cita cancelada', $cita);
+        return true;
     }
 
     public function reprogramarCita(int $id, array $datos): array
     {
-        $cita = $this->consultarCita($id);
+        $cita = $this->repo->buscar($id);
         if (!$cita) {
             return ['ok' => false, 'errores' => ['La cita no existe.']];
         }
+        if ($cita['estado'] === 'Cancelada') {
+            return ['ok' => false, 'errores' => ['No se puede reprogramar una cita cancelada.']];
+        }
 
-        // El tutor se mantiene; solo cambian fecha y horas
-        $datos['tutor_id'] = $cita['tutor_id'];
+        $datos['tutor_id'] = $cita['tutor_id'];   // el tutor se mantiene
 
         $errores = $this->validarDatos($datos);
         if (empty($errores)) {
-            // Se excluye la propia cita para que no choque consigo misma
             $errores = $this->verificarDisponibilidad(
-                (int) $cita['tutor_id'],
-                $datos['fecha'],
-                $datos['hora_inicio'],
-                $datos['hora_fin'],
-                $id
+                (int) $cita['tutor_id'], $datos['fecha'], $datos['hora_inicio'], $datos['hora_fin'], $id
+            );
+        }
+        if (empty($errores)) {
+            $errores = $this->verificarCruceEstudiante(
+                (int) $cita['estudiante_id'], $datos['fecha'], $datos['hora_inicio'], $datos['hora_fin'], $id
             );
         }
         if (!empty($errores)) {
             return ['ok' => false, 'errores' => $errores];
         }
 
-        foreach ($_SESSION['citas'] as &$c) {
-            if ($c['id'] === $id) {
-                $c['fecha'] = $datos['fecha'];
-                $c['hora_inicio'] = $datos['hora_inicio'];
-                $c['hora_fin'] = $datos['hora_fin'];
-                $c['estado'] = 'Reprogramada';
-            }
-        }
-        unset($c);
+        $cita['fecha'] = $datos['fecha'];
+        $cita['hora_inicio'] = $datos['hora_inicio'];
+        $cita['hora_fin'] = $datos['hora_fin'];
+        $cita['estado'] = 'Reprogramada';
+        $this->repo->guardar($cita);
+        $this->notificar('Cita reprogramada', $cita);
 
         return ['ok' => true, 'mensaje' => 'Cita reprogramada correctamente.'];
     }
 
     public function consultarCitas(): array
     {
-        return $_SESSION['citas'];
+        return $this->repo->todas();
+    }
+
+    /** Citas del perfil del estudiante (RF03: consultar desde su perfil). */
+    public function consultarCitasPorEstudiante(int $estudianteId): array
+    {
+        return array_values(array_filter(
+            $this->repo->todas(),
+            fn($c) => ($c['estudiante_id'] ?? null) === $estudianteId
+        ));
     }
 
     public function consultarCita(int $id): ?array
     {
-        foreach ($_SESSION['citas'] as $c) {
-            if ($c['id'] === $id) {
-                return $c;
-            }
+        return $this->repo->buscar($id);
+    }
+
+    /**
+     * Horarios libres de un tutor en una fecha (RF03: "fechas y horarios disponibles").
+     * Combina el horario de atención (Gestión de Tutores) con las citas activas (propio).
+     * Devuelve una lista de ['inicio' => 'HH:MM', 'fin' => 'HH:MM'].
+     */
+    public function horariosDisponibles(int $tutorId, string $fecha, int $minutos = 60): array
+    {
+        $h = $this->tutorService->obtenerHorario($tutorId);
+        if (!$h || $fecha === '' || $fecha < date('Y-m-d')) {
+            return [];
         }
-        return null;
+        $libres = [];
+        $t = strtotime($h['inicio']);
+        $limite = strtotime($h['fin']);
+        while ($t + $minutos * 60 <= $limite) {
+            $ini = date('H:i', $t);
+            $fin = date('H:i', $t + $minutos * 60);
+            if (empty($this->verificarDisponibilidad($tutorId, $fecha, $ini, $fin))) {
+                $libres[] = ['inicio' => $ini, 'fin' => $fin];
+            }
+            $t += $minutos * 60;
+        }
+        return $libres;
     }
 
     /**
      * Verifica disponibilidad. Devuelve lista de errores (vacía = disponible).
-     * - Horario de atención: lo decide Gestión de Tutores (TutorService).
-     * - Cruce con otras citas: lo decide Gestión de Citas (datos propios).
+     * - Horario de atención: lo decide Gestión de Tutores.
+     * - Cruce con otras citas activas: lo decide Gestión de Citas.
      */
     public function verificarDisponibilidad(int $tutorId, string $fecha, string $ini, string $fin, ?int $excluirId = null): array
     {
@@ -143,9 +179,8 @@ class CitaService
         if (!$r['disponible']) {
             return [$r['motivo']];
         }
-
-        foreach ($_SESSION['citas'] as $c) {
-            if ($c['id'] === $excluirId) {
+        foreach ($this->repo->todas() as $c) {
+            if ($c['id'] === $excluirId || $c['estado'] === 'Cancelada') {
                 continue;
             }
             if (
@@ -158,11 +193,44 @@ class CitaService
         return [];
     }
 
+    /** Servicio de Gestión de Estudiantes: ¿puede el estudiante solicitar citas? */
+    private function validarEstudiante(int $estudianteId): array
+    {
+        $r = $this->estudianteService->puedeSolicitarCita($estudianteId);
+        return $r['habilitado'] ? [] : [$r['motivo']];
+    }
+
+    /** Un estudiante no puede tener dos citas activas que se crucen el mismo día. */
+    private function verificarCruceEstudiante(int $estudianteId, string $fecha, string $ini, string $fin, ?int $excluirId = null): array
+    {
+        foreach ($this->repo->todas() as $c) {
+            if ($c['id'] === $excluirId || $c['estado'] === 'Cancelada') {
+                continue;
+            }
+            if (
+                ($c['estudiante_id'] ?? null) == $estudianteId && $c['fecha'] === $fecha
+                && $ini < $c['hora_fin'] && $fin > $c['hora_inicio']
+            ) {
+                return ["El estudiante ya tiene una cita de {$c['hora_inicio']} a {$c['hora_fin']} ese día."];
+            }
+        }
+        return [];
+    }
+
+    /** Avisa al estudiante por correo (Componente Notificaciones). */
+    private function notificar(string $asunto, array $cita): void
+    {
+        $this->notificaciones->enviarCorreo(
+            $this->estudianteService->obtenerCorreo((int) $cita['estudiante_id']),
+            $asunto,
+            "{$asunto}: {$cita['tutor']}, {$cita['fecha']} de {$cita['hora_inicio']} a {$cita['hora_fin']}."
+        );
+    }
+
     /** Validaciones de formato y coherencia de los datos recibidos. */
     private function validarDatos(array $d): array
     {
         $errores = [];
-
         if (empty($d['tutor_id']) || !$this->tutorService->existeTutor((int) $d['tutor_id'])) {
             $errores[] = 'Seleccione un profesional válido.';
         }
@@ -176,7 +244,6 @@ class CitaService
         } elseif ($d['hora_inicio'] >= $d['hora_fin']) {
             $errores[] = 'La hora de inicio debe ser anterior a la hora de fin.';
         }
-
         return $errores;
     }
 }
